@@ -6,7 +6,6 @@ dCSFA-NMF contains pytorch code for Supervised Autoencoders Learn Robust Joint F
 
 - pytorch
 - scikit-learn
-- pickle
 - matplotlib
 - numpy
 - pickle-mixin
