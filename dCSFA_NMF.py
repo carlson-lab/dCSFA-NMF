@@ -18,7 +18,7 @@ class dCSFA_NMF(nn.Module):
     def __init__(self,n_components,dim_in,device='auto',n_intercepts=1,n_sup_networks=1,
                 optim_name='AdamW',recon_loss='IS',sup_recon_weight=1.0,sup_weight=1.0,
                 useDeepEnc=True,h=256,sup_recon_type="Residual",feature_groups=None,group_weights=None,
-                fixed_corr=None):
+                fixed_corr=None,denoising=False):
         """
         Inputs
         ----------------------------
@@ -41,7 +41,7 @@ class dCSFA_NMF(nn.Module):
         variational - bool - indicates if a variational autoencoder will be used.
         prior_mean - int - only used if variational. Zero is the default.
         prior_var - int - only used if variational. One is the default.
-        fixed_corr - {None, "positive","negative"}
+        fixed_corr - list - {"n/a","positive","negative} - List where each element corresponds to the correlation constraint of a corresponding network.
 
         Other Member Variables
         ---------------------------
@@ -53,41 +53,8 @@ class dCSFA_NMF(nn.Module):
         W_nmf - nn.Parameter - Input for the W_nmf decoder function that returns nn.Softplus(W_nmf)
         phi_ - nn.Parameter - Coefficient for the logistic regression classifier
         beta_ nn.Parameter - Bias vector for the logistic regression classifier
+"""
 
-        Example Code
-        ---------------------------
-        #Load the data
-        with open(TRAIN_PATH,"rb") as f:
-            train_dict = pickle.load(f)
-        with open(VAL_PATH,"rb") as f:
-            validation_dict = pickle.load(f)
-
-        #Create Scaling Vectors
-        NUM_FREQS = 56
-        num_features = (train_dict['X_psd'].shape[1] + train_dict['X_ds'].shape[1]) // NUM_FREQS
-        scale_vector = np.array([np.arange(1,57) for feature in range(num_features)]).flatten()
-
-        #Format the data
-        X_train = np.hstack([train_dict["X_psd"],train_dict["X_ds"]])*scale_vector
-        #X_train = X_train / np.mean(X_train,axis=0)
-        y_task_train = train_dict['y_flx'].astype(bool)
-        y_mouse_train = train_dict['y_mouse']
-
-        X_val = np.hstack([validation_dict["X_psd"],validation_dict["X_ds"]])*scale_vector
-        #X_val = X_val / np.mean(X_train,axis=0)
-        y_task_val = validation_dict['y_flx'].astype(bool)
-        y_mouse_val = validation_dict['y_mouse']
-
-        model = dCSFA_NMF(n_components=20,dim_in = X_train.shape[1],device='auto',n_intercepts=1,
-                optim_name='Adam',recon_loss='IS',sup_recon_weight=.001,sup_weight=1.0,
-                useDeepEnc="True",h=256)
-        model.fit(X_train,y_task_train,intercept_mask=None,n_epochs=100,n_pre_epochs=25,batch_size=128,lr=1e-3, 
-                pretrain=True,verbose=True,print_rate=20)
-
-        skl_mse, dcsfa_mse = model.get_skl_nn_mse(X_train)
-        X_recon,X_recon_z1,y_pred,scores = model.transform(X_train)
-        y_pred = model.predict(X_train)
-        """
         super(dCSFA_NMF,self).__init__()
         self.n_components = n_components
         self.dim_in = dim_in
@@ -102,7 +69,14 @@ class dCSFA_NMF(nn.Module):
         self.useDeepEnc = useDeepEnc
         self.sup_recon_type = sup_recon_type
         self.h = h
-        self.fixed_corr = fixed_corr
+        self.denoising = denoising
+
+        if fixed_corr == None:
+            self.fixed_corr = ["n/a" for sup_net in range(self.n_sup_networks)]
+        else:
+            assert len(fixed_corr) == len(range(self.n_sup_networks))
+            self.fixed_corr = fixed_corr
+
         self.skl_pretrain_model = None
         self.feature_groups = feature_groups
         if feature_groups is not None and group_weights is None:
@@ -130,8 +104,8 @@ class dCSFA_NMF(nn.Module):
         self.W_nmf = nn.Parameter(torch.rand(n_components,dim_in))
 
         #Logistic Regression Parameters
-        self.phi_ = nn.Parameter(torch.randn(self.n_sup_networks))
-        self.beta_ = nn.Parameter(torch.randn(n_intercepts,self.n_sup_networks))
+        self.phi_list = nn.ParameterList([nn.Parameter(torch.randn(1)) for sup_network in range(self.n_sup_networks)])
+        self.beta_list = nn.ParameterList([nn.Parameter(torch.randn(n_intercepts)) for sup_network in range(self.n_sup_networks)])
 
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -181,13 +155,13 @@ class dCSFA_NMF(nn.Module):
         W = nn.Softplus()(self.W_nmf)
         return W
 
-    def get_phi(self):
-        if self.fixed_corr == None:
-            return self.phi_
-        elif self.fixed_corr.lower() == "positive":
-            return nn.Softplus()(self.phi_)
-        elif self.fixed_corr.lower() == "negative":
-            return -1*nn.Softplus()(self.phi_)
+    def get_phi(self,sup_net=0):
+        if self.fixed_corr[sup_net] == "n/a":
+            return self.phi_list[sup_net]
+        elif self.fixed_corr[sup_net].lower() == "positive":
+            return nn.Softplus()(self.phi_list[sup_net])
+        elif self.fixed_corr[sup_net].lower() == "negative":
+            return -1*nn.Softplus()(self.phi_list[sup_net])
         else:
             raise ValueError("Unsupported fixed_corr value")
 
@@ -199,7 +173,7 @@ class dCSFA_NMF(nn.Module):
         return recon_loss
 
     @torch.no_grad()
-    def skl_pretrain(self,X,y):
+    def skl_pretrain(self,X,y,nmf_max_iter=100):
         '''
         Description
         ----------------------
@@ -209,53 +183,70 @@ class dCSFA_NMF(nn.Module):
         '''
         print("Pretraining NMF...")
         if self.recon_loss == "IS":
-            skl_NMF = NMF(n_components=self.n_components,solver="mu",beta_loss="itakura-saito",init='nndsvda',max_iter=500)
+            skl_NMF = NMF(n_components=self.n_components,solver="mu",beta_loss="itakura-saito",init='nndsvda',max_iter=nmf_max_iter)
         else:
-            skl_NMF = NMF(n_components=self.n_components,max_iter=500)
+            skl_NMF = NMF(n_components=self.n_components,max_iter=nmf_max_iter)
         s_NMF = skl_NMF.fit_transform(X)
     
+        selected_networks = []
+        selected_aucs = []
+        final_network_order = []
+        for sup_net in range(self.n_sup_networks):
 
-        class_coef_list = []
-        class_bias_list = []
-        class_auc_list = []
-        pMask = y==1
-        nMask = ~pMask
-        print("Identifying predictive components...")
-        for component in tqdm(range(self.n_components)):
+            class_auc_list = []
+            pMask = y[:,sup_net].squeeze()==1
+            nMask = ~pMask
 
-            s_pos = s_NMF[pMask==1,component].reshape(-1,1)
-            s_neg = s_NMF[nMask==1,component].reshape(-1,1)
-            U,pval = mannwhitneyu(s_pos,s_neg)
-            U = U.squeeze()
-            auc = U/(len(s_pos)*len(s_neg))
-            
-            skl_classifier = LogisticRegression()
-            skl_classifier.fit(s_NMF[:,component].reshape(-1,1),y)
+            print("Identifying predictive components for network {}".format(sup_net))
+            for component in tqdm(range(self.n_components)):
 
-            class_coef_list.append(skl_classifier.coef_)
-            class_bias_list.append(skl_classifier.intercept_)
-            class_auc_list.append(auc)
+                s_pos = s_NMF[pMask==1,component].reshape(-1,1)
+                s_neg = s_NMF[nMask==1,component].reshape(-1,1)
+                U,pval = mannwhitneyu(s_pos,s_neg)
+                U = U.squeeze()
+                auc = U/(len(s_pos)*len(s_neg))
 
-        class_auc_list = np.array(class_auc_list) 
+                class_auc_list.append(auc)
 
-        if self.fixed_corr == None:
-            #find most seperable auc
+            class_auc_list = np.array(class_auc_list) 
+
             predictive_order = np.argsort(np.abs(class_auc_list - 0.5))[::-1]
-            print("Selecting most separable correlated NMF factor for init. Network {}, AUC: {}".format(predictive_order[0],class_auc_list[predictive_order[0].astype(int)]))
-            
-        elif self.fixed_corr.lower()=="positive":
-            #find most positive auc
-            predictive_order = np.argsort(class_auc_list)[::-1]
-            print("Selecting most positively correlated NMF factor for init. Network {}, AUC: {}".format(predictive_order[0],class_auc_list[predictive_order[0].astype(int)]))
-        elif self.fixed_corr.lower() == "negative":
-            #find most negative auc
-            predictive_order = np.argsort(1-class_auc_list)[::-1]
-            print("Selecting most negatively correlated NMF factor for init. Network {}, AUC: {}".format(predictive_order[0],class_auc_list[predictive_order[0].astype(int)]))
+            positive_predictive_order = np.argsort(class_auc_list)[::-1]
+            negative_predictive_order = np.argsort(1-class_auc_list)[::-1]
 
+            if len(selected_networks) > 0:
+                for taken_network in selected_networks:
+                    predictive_order = predictive_order[predictive_order != taken_network]
+                    positive_predictive_order = positive_predictive_order[positive_predictive_order != taken_network]
+                    negative_predictive_order = negative_predictive_order[negative_predictive_order != taken_network]
 
-        sorted_NMF = skl_NMF.components_[predictive_order]
+            if self.fixed_corr[sup_net]=="n/a":
+                current_net = predictive_order[0]
+                
+            elif self.fixed_corr[sup_net].lower()=="positive":
+                current_net = positive_predictive_order[0]
+
+            elif self.fixed_corr[sup_net].lower()=="negative":
+                current_net = negative_predictive_order[0]
+            current_auc = class_auc_list[current_net.astype(int)]
+            print("Selecting network: {} with auc {} for sup net {} using constraint {}".format(current_net,current_auc,sup_net,self.fixed_corr[sup_net]))
+            selected_networks.append(current_net)
+            selected_aucs.append(selected_aucs)
+            predictive_order = predictive_order[predictive_order != current_net]
+            positive_predictive_order = positive_predictive_order[positive_predictive_order != current_net]
+            negative_predictive_order = negative_predictive_order[negative_predictive_order != current_net]
+        
+        self.skl_pretrain_networks_ = selected_networks
+        self.skl_pretrain_aucs_ = selected_aucs
+        final_network_order = selected_networks
+
+        for idx,_ in enumerate(predictive_order):
+            final_network_order.append(predictive_order[idx])
+
+        sorted_NMF = skl_NMF.components_[final_network_order]
         self.W_nmf.data = torch.from_numpy(self.inverse_softplus(sorted_NMF).astype(np.float32)).to(self.device)
         self.skl_pretrain_model = skl_NMF
+
 
     def encoder_pretrain(self,X,n_pre_epochs=25,batch_size=128,verbose=False,print_rate=5):
         '''
@@ -315,9 +306,19 @@ class dCSFA_NMF(nn.Module):
         Returns a boolean array of predicted labels. Use include_scores=True to get
         the original scores
         '''
+        if include_scores:
+            y_pred,s = self.predict_proba(X,intercept_mask,include_scores)
+            y_pred = y_pred >0.5
+            return y_pred,s
+        else:
+            y_pred = self.predict_proba(X,intercept_mask,include_scores)
+            return y_pred>0.5
+        
+    @torch.no_grad()
+    def predict_proba(self,X,intercept_mask=None,include_scores=False):
         y_pred_proba,s = self.transform(X,intercept_mask)[2:]
         
-        y_class = y_pred_proba > 0.5
+        y_class = y_pred_proba
         if include_scores:
             return y_class, s
         else:
@@ -343,14 +344,20 @@ class dCSFA_NMF(nn.Module):
         else:
             s = nn.Softplus()(X @ self.Encoder_A + self.Encoder_b)
 
-        if self.n_intercepts == 1:
-            y_pred_proba = nn.Sigmoid()(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks) * self.get_phi() + self.beta_).squeeze()
-        elif self.n_intercepts > 1 and not avgIntercept:
-            y_pred_proba = nn.Sigmoid()(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks) * self.get_phi() + intercept_mask @ self.beta_).squeeze()
-        else:
-            intercept_mask = torch.ones(X.shape[0],self.n_intercepts).to(self.device) / self.n_intercepts
-            y_pred_proba = nn.Sigmoid()(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks) * self.get_phi() + intercept_mask @ self.beta_).squeeze()
+        y_pred_list = []
+        for sup_net in range(self.n_sup_networks):
 
+            if self.n_intercepts == 1:
+                y_pred_proba = nn.Sigmoid()(s[:,sup_net].view(-1,1) * self.get_phi(sup_net) + self.beta_list[sup_net]).squeeze()
+            elif self.n_intercepts > 1 and not avgIntercept:
+                y_pred_proba = nn.Sigmoid()(s[:,sup_net].view(-1,1) * self.get_phi(sup_net) + intercept_mask @ self.beta_list[sup_net]).squeeze()
+            else:
+                intercept_mask = torch.ones(X.shape[0],self.n_intercepts).to(self.device) / self.n_intercepts
+                y_pred_proba = nn.Sigmoid()(s[:,sup_net].view(-1,1) * self.get_phi(sup_net) + intercept_mask @ self.beta_list[sup_net]).squeeze()
+
+            y_pred_list.append(y_pred_proba.view(-1,1))
+        
+        y_pred_proba = torch.cat(y_pred_list,dim=1)
         X_recon = s @ self.get_W_nmf()
 
         if self.sup_recon_type == "Residual":
@@ -364,7 +371,7 @@ class dCSFA_NMF(nn.Module):
         
         return X_recon,sup_recon_loss, y_pred_proba, s
 
-    def fit(self,X,y,y_sample_groups=None,intercept_mask=None,task_mask=None,n_epochs=25,n_pre_epochs=25,batch_size=128,lr=1e-3, 
+    def fit(self,X,y,y_sample_groups=None,intercept_mask=None,task_mask=None,n_epochs=100,n_pre_epochs=100,nmf_max_iter=100,batch_size=128,lr=1e-3, 
             pretrain=True,verbose=False,print_rate=5,X_val=None,y_val=None,task_mask_val=None,best_model_name="dCSFA-NMF-best-model.pt"):
 
         if intercept_mask is not None:
@@ -384,14 +391,14 @@ class dCSFA_NMF(nn.Module):
         self.pred_hist = []
         if verbose: print("Pretraining....")
         if pretrain:
-            self.skl_pretrain(X,y)
+            self.skl_pretrain(X,y,nmf_max_iter)
             self.encoder_pretrain(X,n_pre_epochs=n_pre_epochs,verbose=verbose,
                                     print_rate=print_rate,batch_size=batch_size)
         if verbose: print("Pretraining Complete")
 
         #Prepare sampler information
         if y_sample_groups is None:
-            y_sample_groups = y
+            y_sample_groups = y[:,0]
         
         class_sample_counts = np.array([np.sum(y_sample_groups==group) for group in np.unique(y_sample_groups)])
         weight = 1. / class_sample_counts
@@ -425,12 +432,12 @@ class dCSFA_NMF(nn.Module):
         loader = DataLoader(dset,batch_size=batch_size,sampler=sampler)
         optimizer = self.optim_f(self.parameters(),lr=lr)
 
-        if verbose: print("Beginning Training")
-        epoch_iter = tqdm(range(n_epochs))
+        if verbose: 
+            print("Beginning Training")
+            epoch_iter = tqdm(range(n_epochs))
+        else:
+            epoch_iter = range(n_epochs)
         for epoch in epoch_iter:
-        #for epoch in trange(n_epochs,disable = not verbose, leave=False):
-
-            #Initialize running epoch losses at each epoch
             epoch_loss = 0.0
             recon_e_loss = 0.0
             sup_recon_e_loss = 0.0
@@ -444,7 +451,7 @@ class dCSFA_NMF(nn.Module):
                 else:
                     recon_loss = self.recon_loss_f(X_recon,X_batch)
                 sup_recon_loss = self.sup_recon_weight * sup_recon_loss
-                pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba*task_mask_batch,y_batch)
+                pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba,y_batch)
                 loss = recon_loss + pred_loss + sup_recon_loss
                 loss.backward()
                 optimizer.step()
@@ -455,10 +462,19 @@ class dCSFA_NMF(nn.Module):
                 pred_e_loss += pred_loss.item()
             
             self.training_hist.append(epoch_loss)
-            self.recon_hist.append(recon_e_loss)
-            self.recon_z1_hist.append(sup_recon_e_loss)
-            self.pred_hist.append(pred_e_loss)
 
+            #Get epoch training data performance
+            with torch.no_grad():
+                X_recon_train,sup_recon_loss_train,y_pred_proba_train,_ = self.forward(X,intercept_mask)
+                training_mse_loss = nn.MSELoss()(X_recon_train,X).item()
+                training_sample_auc_list = []
+                for sup_net in range(self.n_sup_networks):
+                    training_sample_auc_list.append(roc_auc_score(y.cpu().detach().numpy()[:,sup_net],y_pred_proba_train.cpu().detach().numpy()[:,sup_net]))
+
+                self.recon_hist.append(training_mse_loss)
+                self.pred_hist.append(training_sample_auc_list)
+
+            #Evaluate Validation Performance
             if X_val is not None and y_val is not None:
                 with torch.no_grad():
                     X_recon_val,sup_recon_loss_val,y_pred_proba_val,_ = self.forward(X_val,avgIntercept=True)
@@ -467,22 +483,31 @@ class dCSFA_NMF(nn.Module):
                     else:
                         val_recon_loss = self.recon_loss_f(X_recon_val,X_val)
                     val_sup_recon_loss = self.sup_recon_weight * sup_recon_loss_val
-                    val_pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba_val*task_mask_val,y_val)
+                    val_pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba_val,y_val)
                     val_loss = val_recon_loss+val_sup_recon_loss+val_pred_loss
+
+                    #val metrics
+                    val_mse = nn.MSELoss()(X_val,X_recon_val).item()
+                    val_sample_auc_list = []
+                    for sup_net in range(self.n_sup_networks):
+                        val_sample_auc_list.append(roc_auc_score(y_val.cpu().detach().numpy()[:,sup_net],y_pred_proba_val.cpu().detach().numpy()[:,sup_net]))
+
                     self.val_loss_hist.append(val_loss.item())
-                    self.val_recon_loss_hist.append(val_recon_loss.item())
+                    self.val_recon_loss_hist.append(val_mse)
                     self.val_sup_recon_loss_hist.append(val_sup_recon_loss.item())
-                    self.val_pred_loss_hist.append(val_pred_loss.item())
+                    self.val_pred_loss_hist.append(val_sample_auc_list)
                 
                 if val_loss.item() < self.best_val_loss:
                     self.best_epoch = epoch
-                    self.best_val_loss = val_loss.item()
+                    self.best_val_recon = val_mse
+                    self.best_val_auc = val_sample_auc_list
                     torch.save(self.state_dict(),self.best_model_name)
 
             if verbose and (X_val is not None and y_val is not None):
-                epoch_iter.set_description(f"Epoch: {epoch}, Best Val (Epoch/Loss): {self.best_epoch,self.best_val_loss}, loss: {epoch_loss}, recon: {recon_e_loss}, pred: {pred_e_loss}")
+                epoch_iter.set_description("Epoch: {}, Best Epoch: {} Best Val Recon: {}, Best Val AUC: {} loss: {}, recon: {}, pred: {}".format(epoch,self.best_epoch,self.best_val_recon,self.best_val_auc,
+                                                                                                                                                                    epoch_loss, training_mse_loss,training_sample_auc_list))
             elif verbose:
-                epoch_iter.set_description(f"Epoch: {epoch}, loss: {epoch_loss}, recon: {recon_e_loss}, pred: {pred_e_loss}")
+                epoch_iter.set_description("Epoch: {}, loss: {:.2}, recon: {:.2}, sample pred aucs: {}".format(epoch,epoch_loss,training_mse_loss,training_sample_auc_list))
         
         if X_val is not None and y_val is not None:
             print("Loading best model...")
