@@ -105,7 +105,7 @@ class dCSFA_NMF(nn.Module):
 
         #Logistic Regression Parameters
         self.phi_list = nn.ParameterList([nn.Parameter(torch.randn(1)) for sup_network in range(self.n_sup_networks)])
-        self.beta_list = nn.ParameterList([nn.Parameter(torch.randn(n_intercepts)) for sup_network in range(self.n_sup_networks)])
+        self.beta_list = nn.ParameterList([nn.Parameter(torch.randn(n_intercepts,1)) for sup_network in range(self.n_sup_networks)])
 
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -445,7 +445,9 @@ class dCSFA_NMF(nn.Module):
 
             for X_batch, y_batch, b_mask_batch,task_mask_batch in loader:
                 optimizer.zero_grad()
+
                 X_recon, sup_recon_loss, y_pred_proba, s = self.forward(X_batch,b_mask_batch,avgIntercept=False)
+
                 if self.feature_groups is not None:
                     recon_loss = self.get_weighted_recon_loss_f(X_recon,X_batch)
                 else:
