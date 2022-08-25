@@ -14,12 +14,17 @@ from torchbd.loss import BetaDivLoss
 from scipy.stats import mannwhitneyu
 import warnings
 
+VERSION = 1.0
+
 class dCSFA_NMF(nn.Module):
     def __init__(self,n_components,dim_in,device='auto',n_intercepts=1,n_sup_networks=1,
                 optim_name='AdamW',recon_loss='IS',sup_recon_weight=1.0,sup_weight=1.0,
                 useDeepEnc=True,h=256,sup_recon_type="Residual",feature_groups=None,group_weights=None,
-                fixed_corr=None,denoising=False):
+                fixed_corr=None,momentum=0.9,sup_smoothness_weight=1):
         """
+        VERSION = 1.0
+        ------------------------
+
         Inputs
         ----------------------------
         n_components - int - The number of latent factors to learn. This is also often referred to as the number of networks
@@ -41,7 +46,9 @@ class dCSFA_NMF(nn.Module):
         variational - bool - indicates if a variational autoencoder will be used.
         prior_mean - int - only used if variational. Zero is the default.
         prior_var - int - only used if variational. One is the default.
-        fixed_corr - list - {"n/a","positive","negative} - List where each element corresponds to the correlation constraint of a corresponding network.
+        fixed_corr - string / list - {"n/a","positive","negative"} - List where each element corresponds to the correlation constraint of a corresponding network. Also allows for string
+                                            inputs of "positive" or "negative" if the number of supervised networks is 1.
+        momentum - float - Momentum value if optim_name is "SGD". Default value is 0.9 per the SGD default.
 
         Other Member Variables
         ---------------------------
@@ -69,10 +76,17 @@ class dCSFA_NMF(nn.Module):
         self.useDeepEnc = useDeepEnc
         self.sup_recon_type = sup_recon_type
         self.h = h
-        self.denoising = denoising
+        self.momentum = momentum
+        self.sup_smoothness_weight = sup_smoothness_weight
+
+        self.__version__ = VERSION
 
         if fixed_corr == None:
             self.fixed_corr = ["n/a" for sup_net in range(self.n_sup_networks)]
+        elif fixed_corr.lower() == "positive":
+            self.fixed_corr = ["positive"]
+        elif fixed_corr.lower() == "negative":
+            self.fixed_corr = ["negative"]
         else:
             assert len(fixed_corr) == len(range(self.n_sup_networks))
             self.fixed_corr = fixed_corr
@@ -334,7 +348,7 @@ class dCSFA_NMF(nn.Module):
         return s_h
 
     def residual_loss_f(self,s,s_h):
-        res_loss = torch.norm(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks)-s_h) / (1 - torch.exp(-torch.norm(s_h)))
+        res_loss = torch.norm(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks)-s_h) / (1 - self.sup_smoothness_weight*torch.exp(-torch.norm(s_h)))
         return res_loss
 
     def forward(self,X,intercept_mask=None,avgIntercept=False):
@@ -430,7 +444,11 @@ class dCSFA_NMF(nn.Module):
         dset = TensorDataset(X,y,intercept_mask,task_mask)
         sampler = WeightedRandomSampler(samples_weights,len(samples_weights))
         loader = DataLoader(dset,batch_size=batch_size,sampler=sampler)
-        optimizer = self.optim_f(self.parameters(),lr=lr)
+
+        if self.optim_name == "SGD":
+            optimizer = self.optim_f(self.parameters(),lr=lr,momentum=self.momentum)
+        else:
+            optimizer = self.optim_f(self.parameters(),lr=lr)
 
         if verbose: 
             print("Beginning Training")
@@ -488,21 +506,22 @@ class dCSFA_NMF(nn.Module):
                     val_pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba_val,y_val)
                     val_loss = val_recon_loss+val_sup_recon_loss+val_pred_loss
 
-                    #val metrics
+                    #val AUC
                     val_mse = nn.MSELoss()(X_val,X_recon_val).item()
                     val_sample_auc_list = []
                     for sup_net in range(self.n_sup_networks):
                         val_sample_auc_list.append(roc_auc_score(y_val.cpu().detach().numpy()[:,sup_net],y_pred_proba_val.cpu().detach().numpy()[:,sup_net]))
 
                     self.val_loss_hist.append(val_loss.item())
-                    self.val_recon_loss_hist.append(val_mse)
+                    self.val_recon_loss_hist.append(val_recon_loss.item())
                     self.val_sup_recon_loss_hist.append(val_sup_recon_loss.item())
                     self.val_pred_loss_hist.append(val_sample_auc_list)
                 
                 if val_loss.item() < self.best_val_loss:
                     self.best_epoch = epoch
-                    self.best_val_recon = val_mse
+                    self.best_val_recon = val_recon_loss
                     self.best_val_auc = val_sample_auc_list
+                    self.best_val_loss = val_loss.item()
                     torch.save(self.state_dict(),self.best_model_name)
 
             if verbose and (X_val is not None and y_val is not None):
@@ -528,15 +547,15 @@ class dCSFA_NMF(nn.Module):
         return X_recon.cpu().detach().numpy()
 
     @torch.no_grad()
-    def get_skl_mse_score(self,X):
+    def get_skl_mse_score(self,X,nmf_max_iter=500):
         if self.skl_pretrain_model is not None:
             s_skl = self.skl_pretrain_model.transform(X)
         else:
             warnings.warn("No Pretraining NMF model present - Training new one from scratch")
             if self.recon_loss == "IS":
-                skl_NMF = NMF(n_components=self.n_components,solver="mu",beta_loss="itakura-saito",init='nndsvda',max_iter=500)
+                skl_NMF = NMF(n_components=self.n_components,solver="mu",beta_loss="itakura-saito",init='nndsvda',nmf_max_iter=100)
             else:
-                skl_NMF = NMF(n_components=self.n_components,max_iter=500)
+                skl_NMF = NMF(n_components=self.n_components,nmf_max_iter=100)
             s_skl = skl_NMF.fit_transform(X)
             self.skl_pretrain_model = skl_NMF
         X_recon_skl = s_skl @ self.skl_pretrain_model.components_

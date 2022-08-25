@@ -248,6 +248,7 @@ def lpne_auc(y_pred,y_true,y_mouse,z=None,mannWhitneyU=False):
                 print("Mouse ",mouse, " has only one class - AUC cannot be calculated")
                 print("n_positive samples ",z_pos_mouse.shape[0])
                 print("n_negative samples ",z_neg_mouse.shape[0])
+                auc_Dict[mouse] = (np.nan,np.nan)
             else:
                 U,pval = mannwhitneyu(z_pos_mouse,z_neg_mouse)
                 mw_auc = U/(len(z_pos_mouse)*len(z_neg_mouse))
@@ -277,11 +278,14 @@ def get_mean_std_err_auc(y_pred,y_true,y_mouse,z=None,mannWhitneyU=False):
         std = np.std(auc_list) / np.sqrt(len(auc_list)-1)
     return mean, std
 
-def make_projection_csv(pickle_file,model,X_feature_list,other_features,save_file,auc_dict=None,auc_type="mw"):
+def make_projection_csv(pickle_file,model,X_feature_list,other_features,save_file,auc_dict=None,auc_type="mw",weights=None):
 
     with open(pickle_file,'rb') as f:
         project_dict = pickle.load(f)
-    X_project = np.hstack([project_dict[feature] for feature in X_feature_list])
+    if weights is None:
+        X_project = np.hstack([project_dict[feature] for feature in X_feature_list])
+    else:
+        X_project = np.hstack([project_dict[feature]*weight for feature,weight in zip(X_feature_list,weights)])
     s = model.project(X_project)
     s = s[:,0]
     save_dict = {}
@@ -340,6 +344,111 @@ def make_recon_plots(model,X,sample,task=" ",title=None,skl_mse=None,nn_mse=None
         plt.savefig(saveFile)
     plt.show()
 
+def getReconContribution(X,n_components,model):
+    perc_contribution_list = []
+    EPSILON = 1e-6
+    X_recon,_,_,s = model.transform(X)
+    for component in range(n_components):
+        X_recon_comp = model.get_comp_recon(s,component)
+        perc_contribution = np.divide(X_recon_comp+EPSILON,X_recon+EPSILON)
+        avg_perc_contribution = np.mean(perc_contribution,axis=0)
+
+        perc_contribution_list.append(avg_perc_contribution)
+    
+    perc_contribution_mat = np.vstack(perc_contribution_list)
+    return perc_contribution_mat
+
+
+def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatures,
+                                        freq=56,net_idx=0,saveFile='demo.png',
+                                        title="Supervised Network Percent Recon Contribution",
+                                        figsize=(30,20), silenceTicks=True):
+    
+    plt.figure(figsize=figsize)
+    num_areas = len(areas)
+    X_psd = X[:,:len(psdFeatures)]
+    X_coh = X[:,len(psdFeatures):(len(psdFeatures)+len(cohFeatures))]
+    X_gc = X[:,(len(psdFeatures)+len(cohFeatures)):]
+
+    print(X_psd.shape,X_coh.shape,X_gc.shape)
+    for idx,area in enumerate(areas):
+        plt.subplot(num_areas,num_areas,idx+1 + num_areas*idx)
+        plt.plot(X_psd[net_idx,idx*56:(idx+1)*56])
+        plt.ylabel(area)
+        plt.xlabel("Freq")
+        plt.ylim([0,1])
+
+        if idx == 0 or idx == num_areas-1:
+            plt.title(area)
+
+    #coherence features
+    reshape_coherence_features = cohFeatures.reshape(-1,56)
+    for feature_idx in range(reshape_coherence_features.shape[0]):
+        feature = reshape_coherence_features[feature_idx,0]
+        area_1, left_over = feature.split('-')
+        area_2, _ = left_over.split(' ')
+
+        idx_area_1 = areas.index(area_1)
+        idx_area_2 = areas.index(area_2)
+
+        subplot_idx = idx_area_1*num_areas + idx_area_2 + 1
+
+
+        plt.subplot(num_areas,num_areas,subplot_idx)
+        #print(subplot_idx,X_coh[net_idx,feature_idx*freq:(feature_idx+1)*freq])
+        plt.plot(X_coh[net_idx,feature_idx*freq:(feature_idx+1)*freq])
+
+        if silenceTicks:
+            plt.yticks([])
+            plt.xticks([])
+        plt.ylim([0,1])
+    reshape_gc_features = gcFeatures.reshape(-1,56)
+    for feature_idx in range(reshape_gc_features.shape[0]):
+        feature = reshape_gc_features[feature_idx,0]
+        area_1, left_over = feature.split('->')
+        area_2, _ = left_over.split(' ')
+
+        idx_area_1 = areas.index(area_1)
+        idx_area_2 = areas.index(area_2)
+
+        if idx_area_1 < idx_area_2:
+            subplot_idx = idx_area_1*num_areas + idx_area_2 + 1
+
+            plt.subplot(num_areas,num_areas,subplot_idx)
+            plt.plot(X_gc[0,feature_idx*freq:(feature_idx+1)*freq]/2 +0.5,color="green")
+            plt.axhline(0.5,alpha=0.5,color='gray')
+            plt.ylim([0,1])
+
+            if silenceTicks:
+                plt.yticks([])
+                plt.xticks([])
+            if subplot_idx%(num_areas)==0:
+                ax2 = plt.twinx()
+                ax2.set_ylim(-1,1)
+            
+            if subplot_idx < num_areas:
+                plt.title(areas[subplot_idx-1])
+        else:
+            #Flip the index order to stay upper triangular
+            subplot_idx = idx_area_2*num_areas + idx_area_1 + 1
+            plt.subplot(num_areas,num_areas,subplot_idx)
+            plt.plot(-X_gc[net_idx,feature_idx*freq:(feature_idx+1)*freq]/2 + 0.5,color="red")
+            plt.axhline(0.5,alpha=0.5,color='gray')
+            plt.ylim([0,1])
+
+            if silenceTicks:
+                plt.yticks([])
+                plt.xticks([])
+            if subplot_idx%(num_areas)==0:
+                ax2 = plt.twinx()
+                ax2.set_ylim(-1,1)
+            
+            if subplot_idx < num_areas:
+                plt.title(areas[subplot_idx-1])
+                
+    plt.suptitle(title)
+    plt.savefig(saveFile)
+    plt.show()
 '''class data_Augmenter(object):
     def __init__(self,list_of_label_lists,imp_strat='zero'):
         super(data_Augmenter,self).__init__()
