@@ -359,7 +359,7 @@ def getReconContribution(X,n_components,model):
     return perc_contribution_mat
 
 
-def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatures,
+def makeUpperTriangularPlot_pow_coh_gc(X,areas,psdFeatures,cohFeatures,gcFeatures,
                                         freq=56,net_idx=0,saveFile='demo.png',
                                         title="Supervised Network Percent Recon Contribution",
                                         figsize=(30,20), silenceTicks=True):
@@ -373,7 +373,7 @@ def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatur
     print(X_psd.shape,X_coh.shape,X_gc.shape)
     for idx,area in enumerate(areas):
         plt.subplot(num_areas,num_areas,idx+1 + num_areas*idx)
-        plt.plot(X_psd[net_idx,idx*56:(idx+1)*56])
+        plt.plot(range(1,freq+1),X_psd[net_idx,idx*56:(idx+1)*56])
         plt.ylabel(area)
         plt.xlabel("Freq")
         plt.ylim([0,1])
@@ -396,7 +396,7 @@ def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatur
 
         plt.subplot(num_areas,num_areas,subplot_idx)
         #print(subplot_idx,X_coh[net_idx,feature_idx*freq:(feature_idx+1)*freq])
-        plt.plot(X_coh[net_idx,feature_idx*freq:(feature_idx+1)*freq])
+        plt.plot(range(1,freq+1),X_coh[net_idx,feature_idx*freq:(feature_idx+1)*freq])
 
         if silenceTicks:
             plt.yticks([])
@@ -415,7 +415,7 @@ def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatur
             subplot_idx = idx_area_1*num_areas + idx_area_2 + 1
 
             plt.subplot(num_areas,num_areas,subplot_idx)
-            plt.plot(X_gc[0,feature_idx*freq:(feature_idx+1)*freq]/2 +0.5,color="green")
+            plt.plot(range(1,freq+1),X_gc[0,feature_idx*freq:(feature_idx+1)*freq]/2 +0.5,color="green")
             plt.axhline(0.5,alpha=0.5,color='gray')
             plt.ylim([0,1])
 
@@ -432,7 +432,77 @@ def oldFeatures_makeUpperTriangularPlot(X,areas,psdFeatures,cohFeatures,gcFeatur
             #Flip the index order to stay upper triangular
             subplot_idx = idx_area_2*num_areas + idx_area_1 + 1
             plt.subplot(num_areas,num_areas,subplot_idx)
-            plt.plot(-X_gc[net_idx,feature_idx*freq:(feature_idx+1)*freq]/2 + 0.5,color="red")
+            plt.plot(range(1,freq+1),-X_gc[net_idx,feature_idx*freq:(feature_idx+1)*freq]/2 + 0.5,color="red")
+            plt.axhline(0.5,alpha=0.5,color='gray')
+            plt.ylim([0,1])
+
+            if silenceTicks:
+                plt.yticks([])
+                plt.xticks([])
+            if subplot_idx%(num_areas)==0:
+                ax2 = plt.twinx()
+                ax2.set_ylim(-1,1)
+            
+            if subplot_idx < num_areas:
+                plt.title(areas[subplot_idx-1])
+                
+    plt.suptitle(title)
+    plt.savefig(saveFile)
+    plt.show()
+
+
+def makeUpperTriangularPlot_pow_ds(X,areas,psdFeatures,dsFeatures,
+                                        freq=56,net_idx=0,saveFile='demo.png',
+                                        title="Supervised Network Percent Recon Contribution",
+                                        figsize=(30,20), silenceTicks=True):
+    
+    plt.figure(figsize=figsize)
+    num_areas = len(areas)
+    X_psd = X[:,:len(psdFeatures)]
+    X_ds = X[:,len(psdFeatures):]
+
+    print(X_psd.shape,X_ds.shape)
+    for idx,area in enumerate(areas):
+        plt.subplot(num_areas,num_areas,idx+1 + num_areas*idx)
+        plt.plot(range(1,freq+1),X_psd[net_idx,idx*56:(idx+1)*56])
+        plt.ylabel(area)
+        plt.xlabel("Freq")
+        plt.ylim([0,1])
+
+        if idx == 0 or idx == num_areas-1:
+            plt.title(area)
+
+    reshape_ds_features = dsFeatures.reshape(-1,56)
+    for feature_idx in range(reshape_ds_features.shape[0]):
+        feature = reshape_ds_features[feature_idx,0]
+        area_1, left_over = feature.split('->')
+        area_2, _ = left_over.split(' ')
+
+        idx_area_1 = areas.index(area_1)
+        idx_area_2 = areas.index(area_2)
+
+        if idx_area_1 < idx_area_2:
+            subplot_idx = idx_area_1*num_areas + idx_area_2 + 1
+
+            plt.subplot(num_areas,num_areas,subplot_idx)
+            plt.plot(range(1,freq+1),X_ds[0,feature_idx*freq:(feature_idx+1)*freq]/2 +0.5,color="green")
+            plt.axhline(0.5,alpha=0.5,color='gray')
+            plt.ylim([0,1])
+
+            if silenceTicks:
+                plt.yticks([])
+                plt.xticks([])
+            if subplot_idx%(num_areas)==0:
+                ax2 = plt.twinx()
+                ax2.set_ylim(-1,1)
+            
+            if subplot_idx < num_areas:
+                plt.title(areas[subplot_idx-1])
+        else:
+            #Flip the index order to stay upper triangular
+            subplot_idx = idx_area_2*num_areas + idx_area_1 + 1
+            plt.subplot(num_areas,num_areas,subplot_idx)
+            plt.plot(range(1,freq+1),-X_ds[net_idx,feature_idx*freq:(feature_idx+1)*freq]/2 + 0.5,color="red")
             plt.axhline(0.5,alpha=0.5,color='gray')
             plt.ylim([0,1])
 
