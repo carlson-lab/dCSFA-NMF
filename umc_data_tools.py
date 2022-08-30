@@ -269,11 +269,11 @@ def lpne_auc(y_pred,y_true,y_mouse,z=None,mannWhitneyU=False):
 def get_mean_std_err_auc(y_pred,y_true,y_mouse,z=None,mannWhitneyU=False):
     auc_dict = lpne_auc(y_pred,y_true,y_mouse,z,mannWhitneyU)
     if mannWhitneyU:
-        auc_list = [auc_dict[mouse][0] for mouse in auc_dict.keys() - ['auc_method'] if auc_dict[mouse][0] == auc_dict[mouse][0]]
+        auc_list = [auc_dict[mouse][0] for mouse in auc_dict.keys() - ['auc_method']]# if auc_dict[mouse][0] == auc_dict[mouse][0]]
         mean = np.mean(auc_list)
         std = np.std(auc_list) / np.sqrt(len(auc_list)-1)
     else:
-        auc_list = [auc_dict[mouse] for mouse in auc_dict.keys() - ['auc_method'] if auc_dict[mouse] == auc_dict[mouse]]
+        auc_list = [auc_dict[mouse] for mouse in auc_dict.keys() - ['auc_method']]# if auc_dict[mouse] == auc_dict[mouse]]
         mean = np.mean(auc_list)
         std = np.std(auc_list) / np.sqrt(len(auc_list)-1)
     return mean, std

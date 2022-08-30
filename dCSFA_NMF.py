@@ -83,10 +83,15 @@ class dCSFA_NMF(nn.Module):
 
         if fixed_corr == None:
             self.fixed_corr = ["n/a" for sup_net in range(self.n_sup_networks)]
-        elif fixed_corr.lower() == "positive":
-            self.fixed_corr = ["positive"]
-        elif fixed_corr.lower() == "negative":
-            self.fixed_corr = ["negative"]
+        elif type(fixed_corr)!=list:
+            if fixed_corr.lower() == "positive":
+                self.fixed_corr = ["positive"]
+            elif fixed_corr.lower() == "negative":
+                self.fixed_corr = ["negative"]
+            elif fixed_corr.lower() == "n/a":
+                self.fixed_corr = ["n/a"]
+            else:
+                raise ValueError("fixed corr must be a list or in {`positive`,`negative`,`n/a`}")
         else:
             assert len(fixed_corr) == len(range(self.n_sup_networks))
             self.fixed_corr = fixed_corr
@@ -243,7 +248,7 @@ class dCSFA_NMF(nn.Module):
             elif self.fixed_corr[sup_net].lower()=="negative":
                 current_net = negative_predictive_order[0]
             current_auc = class_auc_list[current_net.astype(int)]
-            print("Selecting network: {} with auc {} for sup net {} using constraint {}".format(current_net,current_auc,sup_net,self.fixed_corr[sup_net]))
+            print("Selecting network: {} with auc {} for sup net {} using constraint {} correlation".format(current_net,current_auc,sup_net,self.fixed_corr[sup_net]))
             selected_networks.append(current_net)
             selected_aucs.append(selected_aucs)
             predictive_order = predictive_order[predictive_order != current_net]
@@ -351,6 +356,13 @@ class dCSFA_NMF(nn.Module):
         res_loss = torch.norm(s[:,:self.n_sup_networks].view(-1,self.n_sup_networks)-s_h) / (1 - self.sup_smoothness_weight*torch.exp(-torch.norm(s_h)))
         return res_loss
 
+    #def multiNetwork_BCE(self,y_pred,y_true,weights):
+    #    mn_BCE = 0
+    #    for network in range(self.n_sup_networks):
+    #        mn_BCE += nn.BCELoss(weight=weights[:,network])(y_true[:,network],y_pred[:,network])
+    #    print(mn_BCE)
+    #    return mn_BCE
+
     def forward(self,X,intercept_mask=None,avgIntercept=False):
         #Encode X using the deep or linear encoder
         if self.useDeepEnc:
@@ -385,8 +397,8 @@ class dCSFA_NMF(nn.Module):
         
         return X_recon,sup_recon_loss, y_pred_proba, s
 
-    def fit(self,X,y,y_sample_groups=None,intercept_mask=None,task_mask=None,n_epochs=100,n_pre_epochs=100,nmf_max_iter=100,batch_size=128,lr=1e-3, 
-            pretrain=True,verbose=False,print_rate=5,X_val=None,y_val=None,task_mask_val=None,best_model_name="dCSFA-NMF-best-model.pt"):
+    def fit(self,X,y,y_pred_weights=None,y_sample_groups=None,intercept_mask=None,task_mask=None,n_epochs=100,n_pre_epochs=100,nmf_max_iter=100,batch_size=128,lr=1e-3, 
+            pretrain=True,verbose=False,print_rate=5,X_val=None,y_val=None,y_pred_weights_val=None,task_mask_val=None,best_model_name="dCSFA-NMF-best-model.pt"):
 
         if intercept_mask is not None:
             assert intercept_mask.shape == (X.shape[0],self.n_intercepts)
@@ -427,6 +439,11 @@ class dCSFA_NMF(nn.Module):
         else:
             task_mask = torch.Tensor(task_mask).to(self.device)
 
+        if y_pred_weights is None:
+            y_pred_weights = torch.ones((y[:,0].shape[0],1)).to(self.device)
+        else:
+            y_pred_weights = torch.Tensor(y_pred_weights).to(self.device)
+
         if X_val is not None and y_val is not None:
             self.best_model_name = best_model_name
             self.best_val_loss = 1e8
@@ -436,12 +453,18 @@ class dCSFA_NMF(nn.Module):
             self.val_pred_loss_hist = []
             X_val = torch.Tensor(X_val).to(self.device)
             y_val = torch.Tensor(y_val).to(self.device)
+
             if task_mask_val is None:
                 task_mask_val = torch.ones_like(y_val).to(self.device)
             else:
                 task_mask_val = torch.Tensor(task_mask_val).to(self.device)
 
-        dset = TensorDataset(X,y,intercept_mask,task_mask)
+            if y_pred_weights_val is None:
+                y_pred_weights_val = torch.ones((y_val[:,0].shape[0],1)).to(self.device)
+            else:
+                y_pred_weights_val = torch.Tensor(y_pred_weights_val).to(self.device)
+
+        dset = TensorDataset(X,y,intercept_mask,task_mask,y_pred_weights)
         sampler = WeightedRandomSampler(samples_weights,len(samples_weights))
         loader = DataLoader(dset,batch_size=batch_size,sampler=sampler)
 
@@ -461,7 +484,7 @@ class dCSFA_NMF(nn.Module):
             sup_recon_e_loss = 0.0
             pred_e_loss = 0.0
 
-            for X_batch, y_batch, b_mask_batch,task_mask_batch in loader:
+            for X_batch, y_batch, b_mask_batch,task_mask_batch,y_pred_weight_batch in loader:
                 optimizer.zero_grad()
 
                 X_recon, sup_recon_loss, y_pred_proba, s = self.forward(X_batch,b_mask_batch,avgIntercept=False)
@@ -471,7 +494,8 @@ class dCSFA_NMF(nn.Module):
                 else:
                     recon_loss = self.recon_loss_f(X_recon,X_batch)
                 sup_recon_loss = self.sup_recon_weight * sup_recon_loss
-                pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba,y_batch)
+                pred_loss = self.sup_weight * nn.BCELoss(weight=y_pred_weight_batch)(y_pred_proba*task_mask_batch,y_batch*task_mask_batch)
+                #pred_loss = self.sup_weight * self.multiNetwork_BCE(y_pred=y_pred_proba,y_true=y_batch,weights=task_mask_batch)
                 loss = recon_loss + pred_loss + sup_recon_loss
                 loss.backward()
                 optimizer.step()
@@ -503,7 +527,8 @@ class dCSFA_NMF(nn.Module):
                     else:
                         val_recon_loss = self.recon_loss_f(X_recon_val,X_val)
                     val_sup_recon_loss = self.sup_recon_weight * sup_recon_loss_val
-                    val_pred_loss = self.sup_weight * nn.BCELoss()(y_pred_proba_val,y_val)
+                    val_pred_loss = self.sup_weight * nn.BCELoss(y_pred_weights_val)(y_pred_proba_val*task_mask_val,y_val*task_mask_val)
+                    #val_pred_loss = self.sup_weight * self.multiNetwork_BCE(y_pred=y_pred_proba_val,y_true=y_val,weights=task_mask_val)
                     val_loss = val_recon_loss+val_sup_recon_loss+val_pred_loss
 
                     #val AUC
@@ -525,10 +550,10 @@ class dCSFA_NMF(nn.Module):
                     torch.save(self.state_dict(),self.best_model_name)
 
             if verbose and (X_val is not None and y_val is not None):
-                epoch_iter.set_description("Epoch: {}, Best Epoch: {} Best Val Recon: {}, Best Val AUC: {} loss: {}, recon: {}, pred: {}".format(epoch,self.best_epoch,self.best_val_recon,self.best_val_auc,
+                epoch_iter.set_description("Epoch: {}, Best Epoch: {} Best Val Recon: {}, Best Val by Window ROC-AUC: {} loss: {}, recon: {}, pred by Window roc-auc: {}".format(epoch,self.best_epoch,self.best_val_recon,self.best_val_auc,
                                                                                                                                                                     epoch_loss, training_mse_loss,training_sample_auc_list))
             elif verbose:
-                epoch_iter.set_description("Epoch: {}, loss: {:.2}, recon: {:.2}, sample pred aucs: {}".format(epoch,epoch_loss,training_mse_loss,training_sample_auc_list))
+                epoch_iter.set_description("Epoch: {}, loss: {:.2}, recon: {:.2}, sample pred by Window roc-aucs: {}".format(epoch,epoch_loss,training_mse_loss,training_sample_auc_list))
         
         if X_val is not None and y_val is not None:
             print("Loading best model...")
