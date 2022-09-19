@@ -333,10 +333,17 @@ class dCSFA_NMF(NMF_Base):
                 else:
                     epoch_iter.set_description("Epoch: {}, Current Training MSE: {:.6}, Current Training by Window ROC-AUC: {}".format(epoch,training_mse_loss,training_auc_list))
         
+        if self.verbose:
+            print("Saving the last epoch with training MSE: {:.6} and AUCs:".format(training_mse_loss,training_auc_list))
+        torch.save(self.state_dict(),self.saveFolder + "dCSFA-NMF-last-epoch.pt") #Last epoch is saved in case the saved 'best model' doesn't make sense
+        
         if X_val is not None and y_val is not None:
             if self.verbose:
                 print("Loaded the best model from Epoch: {} with MSE: {:.6} and AUCs: {}".format(self.best_epoch,self.best_val_recon,self.best_val_aucs))
             self.load_state_dict(torch.load(self.saveFolder+self.best_model_name))
+
+    def load_last_epoch(self):
+        self.load_state_dict(torch.load(self.saveFolder + "dCSFA-NMF-last-epoch.pt"))
 
     def reconstruct(self,X,component=None):
         X_recon,_,s = self.transform(X)
