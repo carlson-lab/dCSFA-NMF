@@ -129,11 +129,10 @@ class dCSFA_NMF(NMF_Base):
         return recon_loss, pred_loss
 
     @torch.no_grad()
-    def transform(self,X,y,intercept_mask=None,avgIntercept=True,return_npy=True):
+    def transform(self,X,intercept_mask=None,avgIntercept=True,return_npy=True):
+
         if not torch.is_tensor(X):
             X = torch.Tensor(X).float().to(self.device)
-        if not torch.is_tensor(y):
-            y = torch.Tensor(y).float().to(self.device)
 
         s = self.get_embedding(X)
         X_recon = self.get_all_comp_recon(s)
@@ -338,6 +337,65 @@ class dCSFA_NMF(NMF_Base):
             if self.verbose:
                 print("Loaded the best model from Epoch: {} with MSE: {:.6} and AUCs: {}".format(self.best_epoch,self.best_val_recon,self.best_val_aucs))
             self.load_state_dict(torch.load(self.saveFolder+self.best_model_name))
+
+    def reconstruct(self,X,component=None):
+        X_recon,_,s = self.transform(X)
+
+        if component is not None:
+            X_recon = self.get_comp_recon(s,component)
+
+        return X_recon
+
+    def predict_proba(self,X,return_scores=False):
+        _,y_pred,s = self.transform(X)
+
+        if return_scores:
+            return y_pred, s
+        else:
+            return y_pred
+
+    def predict(self,X,return_scores=False):
+
+        _,y_pred,s = self.transform(X)
+
+        if return_scores:
+            return y_pred > 0.5, s
+        else:
+            return y_pred > 0.5
+
+    def project(self,X):
+        _,_,s = self.transform(X)
+        return s
+
+    def score(self,X,y,groups=None,return_dict=False):
+        _,y_pred,_ = self.transform(X)
+
+        if groups is not None:
+            auc_dict = {}
+            for group in np.unique(groups):
+                auc_list = []
+                for sup_net in range(self.n_sup_networks):
+                    auc = roc_auc_score(y[:,sup_net],y_pred[:,sup_net])
+                    auc_list.append(auc)
+                
+                auc_dict[group] = auc_list
+
+            if return_dict:
+                return auc_dict
+
+            else:
+                auc_array = np.vstack([auc_dict[key] for key in np.unique(groups)])
+                return np.mean(auc_array,axis=0)
+        
+        else:
+            auc_list = []
+            for sup_net in range(self.n_sup_networks):
+                auc = roc_auc_score(y[:,sup_net],y_pred[:,sup_net])
+                auc_list.append(auc)
+
+            return np.array(auc_list)
+
+
 
 
 

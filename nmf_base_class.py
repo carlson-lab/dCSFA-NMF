@@ -74,6 +74,23 @@ class NMF_Base(nn.Module):
         self.W_nmf = nn.Parameter(torch.rand(self.n_components,dim_in))
         self.to(self.device)
 
+    @staticmethod
+    def inverse_softplus(x, eps=1e-5):
+        '''
+        Gets the inverse softplus for sklearn model pretraining
+        '''
+        # Calculate inverse softplus
+        x_inv_softplus = np.log(np.exp(x+eps) - (1.0 - eps))
+        
+        # Return inverse softplus
+        return x_inv_softplus
+
+    def get_W_nmf(self):
+        """
+        Passes the W_nmf parameter through a softplus function to make it non-negative
+        """
+        return nn.Softplus()(self.W_nmf)
+
     @torch.no_grad()
     def get_recon_loss(self,recon_loss):
         """
@@ -216,7 +233,7 @@ class NMF_Base(nn.Module):
 
         #Save the final sorted components to the W_nmf parameter
         sorted_NMF = self.NMF_init.components_[final_network_order]
-        self.W_nmf.data = torch.from_numpy(sorted_NMF.astype(np.float32)).to(self.device)
+        self.W_nmf.data = torch.from_numpy(self.inverse_softplus(sorted_NMF.astype(np.float32))).to(self.device)
 
     def get_sup_recon(self,s):
         """
@@ -234,7 +251,7 @@ class NMF_Base(nn.Module):
             Reconstruction using only supervised components
             Shape: ``[n_samps,n_features]``
         """
-        X_sup_recon = s[:,:self.n_sup_networks].view(-1,self.n_sup_networks) @ self.W_nmf[:self.n_sup_networks,:].view(self.n_sup_networks,-1)
+        X_sup_recon = s[:,:self.n_sup_networks].view(-1,self.n_sup_networks) @ self.get_W_nmf()[:self.n_sup_networks,:].view(self.n_sup_networks,-1)
         return X_sup_recon
 
     def get_residual_scores(self,X,s):
@@ -254,8 +271,8 @@ class NMF_Base(nn.Module):
             Factor activation scores
             Shape: ``[n_samples,n_components]``
         """
-        resid = (X-s[:,self.n_sup_networks:] @ self.W_nmf[self.n_sup_networks:,:])
-        w_sup = self.W_nmf[:self.n_sup_networks,:].view(self.n_sup_networks,-1)
+        resid = (X-s[:,self.n_sup_networks:] @ self.get_W_nmf()[self.n_sup_networks:,:])
+        w_sup = self.get_W_nmf()[:self.n_sup_networks,:].view(self.n_sup_networks,-1)
         s_h = resid @ w_sup.T @ torch.inverse(w_sup@w_sup.T)
         return s_h
 
@@ -361,7 +378,7 @@ class NMF_Base(nn.Module):
         """
         recon_loss = 0.0
 
-        X_recon = s @ self.W_nmf
+        X_recon = s @ self.get_W_nmf()
 
         recon_loss += self.recon_weight*self.eval_recon_loss(X_recon,X)
 
@@ -395,7 +412,7 @@ class NMF_Base(nn.Module):
         X_recon : numpy.ndarray
             Reconstruction using a specific component
         """
-        X_recon = s[:,component].view(-1,1) @ self.W_nmf[component,:].view(1,-1)
+        X_recon = s[:,component].view(-1,1) @ self.get_W_nmf()[component,:].view(1,-1)
         return X_recon.detach().cpu().numpy()
 
     @torch.no_grad()
@@ -414,7 +431,7 @@ class NMF_Base(nn.Module):
         X_recon : numpy.ndarray
             Reconstruction using a specific component
         """
-        X_recon = s @ self.W_nmf
+        X_recon = s @ self.get_W_nmf()
         return X_recon
     @torch.no_grad()
     def get_factor(self,component):
@@ -431,4 +448,4 @@ class NMF_Base(nn.Module):
         factor : np.ndarray
             Factor from W_nmf
         """
-        return self.W_nmf[component,:].detach().cpu().numpy()
+        return self.get_W_nmf()[component,:].detach().cpu().numpy()
