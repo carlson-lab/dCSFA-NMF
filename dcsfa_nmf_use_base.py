@@ -325,7 +325,39 @@ class dCSFA_NMF(NMF_Base):
     def fit(self,X,y,y_pred_weights=None,task_mask=None,intercept_mask=None,y_sample_groups=None,n_epochs=100,n_pre_epochs=100,nmf_max_iter=100,
             batch_size=128,lr=1e-3,pretrain=True,verbose=False,X_val=None,y_val=None,y_pred_weights_val=None,task_mask_val=None,
             best_model_name="dCSFA-NMF-best-model.pt"):
+        """
+        fit the model
 
+        Args:
+            X (np.ndarray): Input Features
+                Shape: ``[n_samples, n_features]``
+            y (np.ndarray): ground truth labels
+                Shape: ``[n_samples, n_sup_networks]``
+            y_pred_weights (np.ndarray, optional): supervision window specific importance weights. Defaults to None.
+                Shape: ``[n_samples,1]``
+            task_mask (np.ndarray, optional): identifies which windows should be trained on which tasks. Defaults to None.
+                Shape: ``[n_samples,n_sup_networks]``
+            intercept_mask (np.ndarray, optional): One-Hot Mask for group specific intercepts in the logistic regression model. Defaults to None.
+                Shape: ``[n_samples,n_intercepts]``
+            y_sample_groups (_type_, optional): groups for creating sample weights - each group will be sampled evenly. Defaults to None.
+                Shape: ``[n_samples,1]``
+            n_epochs (int, optional): number of training epochs. Defaults to 100.
+            n_pre_epochs (int, optional): number of pretraining epochs. Defaults to 100.
+            nmf_max_iter (int, optional): max iterations for NMF pretraining solver. Defaults to 100.
+            batch_size (int, optional): batch size for gradient descent. Defaults to 128.
+            lr (_type_, optional): learning rate for gradient descent. Defaults to 1e-3.
+            pretrain (bool, optional): whether or not to pretrain the generative model. Defaults to True.
+            verbose (bool, optional): activate or deactivate print statements. Defaults to False.
+            X_val (np.ndarray, optional): Validation Features for checkpointing. Defaults to None.
+                Shape: ``[n_val_samples,n_features]``
+            y_val (np.ndarray, optional): Validation Labels for checkpointing. Defaults to None.
+                Shape: ``[n_val_samples,n_sup_networks]``
+            y_pred_weights_val (np.ndarray, optional): window specific classification weights. Defaults to None.
+                Shape: ``[n_val_samples,1]``
+            task_mask_val (np.ndarray, optional): validation task relevant window masking. Defaults to None.
+                Shape: ``[n_val_samples,n_sup_networks]``
+            best_model_name (str, optional): save file name for the best model. Must end in ".pt". Defaults to "dCSFA-NMF-best-model.pt".
+        """
         #Initialize model parameters
         self._initialize(X.shape[1])
 
