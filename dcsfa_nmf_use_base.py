@@ -19,7 +19,36 @@ class dCSFA_NMF(NMF_Base):
                 optim_name='AdamW',recon_loss='MSE',recon_weight=1.0,sup_weight=1.0,sup_recon_weight=1.0,
                 useDeepEnc=True,h=256,sup_recon_type="Residual",feature_groups=None,group_weights=None,
                 fixed_corr=None,momentum=0.9,lr=1e-3,sup_smoothness_weight=1.0,saveFolder="~",verbose=False):
+        """dCSFA-NMF Encoder class that makes use of the nmf_base_class.
 
+        Args:
+            n_components (int): number of networks to learn or latent dimensionality
+            device (str, optional): torch device in {"cuda","cpu","auto"}. Defaults to 'auto'.
+            n_intercepts (int, optional): Number of unique intercepts for logistic regression 
+                (sometimes mouse specific intercept is helpful). Defaults to 1.
+            n_sup_networks (int, optional): Number of networks that will be supervised (0 < n_sup_networks < n_components). Defaults to 1.
+            optim_name (str, optional): torch.optim algorithm to use in {"SGD","Adam","AdamW"}. Defaults to 'AdamW'.
+            recon_loss (str, optional): Reconstruction loss function in {"IS","MSE"}. Defaults to 'MSE'.
+            recon_weight (float, optional): Importance weight for the reconstruction. Defaults to 1.0.
+            sup_weight (float, optional): Importance weight for the supervision. Defaults to 1.0.
+            sup_recon_weight (float, optional): Importance weight for the reconstruction of the supervised component. Defaults to 1.0.
+            useDeepEnc (bool, optional): Whether to use a deep or linear encoder. Defaults to True.
+            h (int, optional): hidden layer size for the deep encoder. Defaults to 256.
+            sup_recon_type (str, optional): Which supervised component reconstruction loss to use in {"Residual","All"}. Defaults to "Residual".
+                "Residual" - Estimates network scores optimal for reconstruction and penalizes deviation of the real scores from those values
+                "All" - Evaluates the recon_loss of the supervised network reconstruction against all features. 
+            feature_groups (list of int, optional): Indices of the divisions of feature types. Defaults to None.
+            group_weights (list of floats, optional): Weights for each of the feature types. Defaults to None.
+            fixed_corr (list of str, optional): List the same length as n_sup_networks indicating correlation constraints for the network. Defaults to None.
+                "positive" - constrains a supervised network to have a positive correlation between score and label
+                "negative" - constrains a supervised network to have a negative correlation between score and label
+                "n/a" - no constraint is applied and the supervised network can be positive or negatively correlated. 
+            momentum (float, optional): momentum value if optimizer is "SGD". Defaults to 0.9.
+            lr (float, optional): learning rate for the optimizer. Defaults to 1e-3.
+            sup_smoothness_weight (float, optional): Encourages smoothness for the supervised network. Defaults to 1.0.
+            saveFolder (str, optional): Location to save the best pytorch model parameters. Defaults to "~".
+            verbose (bool, optional): Activates or deactivates print statements globally. Defaults to False.
+        """
         super(dCSFA_NMF,self).__init__(n_components,device,n_sup_networks,fixed_corr,recon_loss,recon_weight,
                 sup_recon_type,sup_recon_weight,sup_smoothness_weight,feature_groups,group_weights,verbose)
 
@@ -38,6 +67,12 @@ class dCSFA_NMF(NMF_Base):
         print("Model parameters will be saved to directory: {}".format(saveFolder))
 
     def _initialize(self,dim_in):
+        """
+        Initializes encoder and NMF parameters using the input dimensionality
+
+        Args:
+            dim_in (int): number of features (in total)
+        """
         self.dim_in = dim_in
 
         self._initialize_NMF(dim_in) #definition in nmf_base_class
@@ -61,6 +96,12 @@ class dCSFA_NMF(NMF_Base):
         self.to(self.device) #device set in nmf_base_class
 
     def instantiate_optimizer(self):
+        """
+        Creates an optimizer object
+
+        Returns:
+            optimizer (torch.optim): optimizer function with model parameters
+        """
         if self.optim_name == "SGD":
             optimizer = self.optim_alg(self.parameters(),lr=self.lr,momentum=self.momentum)
         else:
@@ -68,7 +109,22 @@ class dCSFA_NMF(NMF_Base):
         return optimizer
 
     def get_all_class_predictions(self,X,s,intercept_mask,avgIntercept):
+        """
+        get predictions for every supervised network
 
+        Args:
+            X (torch.Tensor): Input Features
+                Shape: ``[batch_size,n_features]``
+            s (torch.Tensor): latent embeddings
+                Shape: ``[batch_size,n_components]``
+            intercept_mask (torch.Tensor): OneHot encoded mask for logistic regression intercept terms
+                Shape: ``[batch_size,n_intercepts]``
+            avgIntercept (bool): Whether to average all intercepts together
+
+        Returns:
+            y_pred_proba (torch.Tensor): predictions
+                Shape: ``[batch_size,n_sup_networks]``
+        """
         if intercept_mask is None and avgIntercept is False:
             warnings.warn("Intercept mask cannot be none and avgIntercept False... Averaging Intercepts")
             avgIntercept=True
@@ -93,6 +149,17 @@ class dCSFA_NMF(NMF_Base):
         return y_pred_proba
 
     def get_embedding(self,X):
+        """
+        Forward pass of the encoder
+
+        Args:
+            X (torch.Tensor): Input Features
+                Shape: ``[batch_size,n_features]``
+
+        Returns:
+            s (torch.Tensor): latent embeddings (scores)
+                Shape: ``[batch_size,n_components]``
+        """
         #Encode X using the deep or linear encoder
         if self.useDeepEnc:
             s = self.Encoder(X)
@@ -102,6 +169,18 @@ class dCSFA_NMF(NMF_Base):
         return s
 
     def get_phi(self,sup_net=0):
+        """
+        Returns the logistic regression coefficient constrained by chosen correlation.
+
+        Args:
+            sup_net (int, optional): Which supervised network you would like to get a coefficient for. Defaults to 0.
+
+        Raises:
+            ValueError: If self.fixed_corr[sup_net] is not in {"n/a","positive","negative"}. This should be caught at initialization.
+
+        Returns:
+            phi (torch.Tensor): the coefficient that has either been returned raw, or through a positive or negative softplus(phi).
+        """
         if self.fixed_corr[sup_net] == "n/a":
             return self.phi_list[sup_net]
         elif self.fixed_corr[sup_net].lower() == "positive":
@@ -113,7 +192,26 @@ class dCSFA_NMF(NMF_Base):
 
 
     def forward(self,X,y,task_mask,pred_weight,intercept_mask=None,avgIntercept=False):
+        """
+        dCSFA-NMF forward pass
 
+        Args:
+            X (torch.Tensor): Input Features
+                Shape: ``[batch_size,n_features]``
+            y (torch.Tensor): ground truth labels
+                Shape: ``[batch_size,n_sup_networks]``
+            task_mask (torch.Tensor): per window mask for whether or not predictions should be counted
+                Shape: ``[batch_size,n_sup_networks]``
+            pred_weight (torch.Tensor): per window classification importance weighting
+                Shape: ``[batch_size,1]``
+            intercept_mask (torch.Tensor, optional): window specific intercept mask. Defaults to None.
+                Shape: ``[batch_size,n_intercepts]``
+            avgIntercept (bool, optional): Whether or not to average intercepts - used in evaluation. Defaults to False.
+
+        Returns:
+            recon_loss (torch.Tensor): recon_weight*full_recon_loss + sup_recon_weight*sup_recon_loss
+            pred_loss (torch.Tensor): sup_weight*BCELoss()
+        """
         #Get the scores from the encoder
         s = self.get_embedding(X)
 
@@ -130,7 +228,25 @@ class dCSFA_NMF(NMF_Base):
 
     @torch.no_grad()
     def transform(self,X,intercept_mask=None,avgIntercept=True,return_npy=True):
+        """
+        Transform method to return reconstruction, predictions, and projections
 
+        Args:
+            X (torch.Tensor): Input Features
+                Shape: ``[batch_size,n_features]``
+            intercept_mask (torch.Tensor, optional): window specific intercept mask. Defaults to None.
+                Shape: ``[batch_size,n_intercepts]``
+            avgIntercept (bool, optional): Whether or not to average intercepts - used in evaluation. Defaults to False.
+            return_npy (bool, optional): Whether or not to convert to numpy arrays. Defaults to True.
+
+        Returns:
+            X_recon (torch.Tensor) : Full reconstruction of input features
+                Shape: ``[n_samples,n_features]``
+            y_pred (torch.Tensor) : All task predictions
+                Shape: ``[n_samples,n_sup_networks]``
+            s (torch.Tensor) : Network activation scores
+                Shape: ``[n_samples,n_components]``
+        """
         if not torch.is_tensor(X):
             X = torch.Tensor(X).float().to(self.device)
 
@@ -147,7 +263,25 @@ class dCSFA_NMF(NMF_Base):
 
 
     def pretrain_encoder(self,X,y,y_pred_weights,task_mask,intercept_mask,sample_weights,n_pre_epochs=100,batch_size=128):
+        """
+        Pretrains the encoder to find a corresponding mapping to the pretrained NMF decoder
 
+        Args:
+            X (torch.Tensor): Input Features
+                Shape: ``[n_samples,n_features]``
+            y (torch.Tensor): ground truth labels
+                Shape: ``[n_samples,n_sup_networks]``
+            task_mask (torch.Tensor): per window mask for whether or not predictions should be counted
+                Shape: ``[n_samples,n_sup_networks]``
+            y_pred_weight (torch.Tensor): per window classification importance weighting
+                Shape: ``[n_samples,1]``
+            intercept_mask (torch.Tensor, optional): window specific intercept mask. Defaults to None.
+                Shape: ``[n_samples,n_intercepts]``
+            sample_weights (torch.Tensor): Gradient Descent sampling weights.
+                Shape: ``[n_samples,1]
+            n_pre_epochs (int,optional): number of epochs for pretraining the encoder. Defaults to 100
+            batch_size (int,optional): batch size for pretraining. Defaults to 128
+        """
         #Freeze the decoder
         self.W_nmf.requires_grad = False
 
@@ -334,7 +468,7 @@ class dCSFA_NMF(NMF_Base):
                     epoch_iter.set_description("Epoch: {}, Current Training MSE: {:.6}, Current Training by Window ROC-AUC: {}".format(epoch,training_mse_loss,training_auc_list))
         
         if self.verbose:
-            print("Saving the last epoch with training MSE: {:.6} and AUCs:".format(training_mse_loss,training_auc_list))
+            print("Saving the last epoch with training MSE: {:.6} and AUCs:{}".format(training_mse_loss,training_auc_list))
         torch.save(self.state_dict(),self.saveFolder + "dCSFA-NMF-last-epoch.pt") #Last epoch is saved in case the saved 'best model' doesn't make sense
         
         if X_val is not None and y_val is not None:
@@ -343,9 +477,24 @@ class dCSFA_NMF(NMF_Base):
             self.load_state_dict(torch.load(self.saveFolder+self.best_model_name))
 
     def load_last_epoch(self):
+        """
+        Loads model parameters of the last epoch in case the last epoch is preferable to the early stop
+        checkpoint conditions. This will be visible in the training printout if self.verbose=True
+        """
         self.load_state_dict(torch.load(self.saveFolder + "dCSFA-NMF-last-epoch.pt"))
 
     def reconstruct(self,X,component=None):
+        """
+        Gets full or partial reconstruction.
+
+        Args:
+            X (numpy.ndarray): Input Features
+                Shape: ``[n_samples,n_features]``
+            component (int,optional):identifies which component to use for reconstruction
+
+        Returns:
+            X_recon: Full recon if component=None, else, recon for network[comopnent]
+        """
         X_recon,_,s = self.transform(X)
 
         if component is not None:
@@ -354,6 +503,19 @@ class dCSFA_NMF(NMF_Base):
         return X_recon
 
     def predict_proba(self,X,return_scores=False):
+        """
+        Returns prediction probabilities
+        Args:
+            X (numpy.ndarray): Input Features
+                Shape: ``[n_samples,n_features]``
+            return_scores (bool, optional): Whether or not to include the projections. Defaults to False.
+
+        Returns:
+            y_pred_proba (numpy.ndarray): predictions
+                Shape: ``[n_samples,n_sup_networks]``
+            s (numpy.ndarray): supervised network activation scores
+                Shape: ``[n_samples,n_components]
+        """
         _,y_pred,s = self.transform(X)
 
         if return_scores:
@@ -362,7 +524,18 @@ class dCSFA_NMF(NMF_Base):
             return y_pred
 
     def predict(self,X,return_scores=False):
+        """
+        Returns binned predictions
+        Args:
+            X (numpy.ndarray): Input Features
+            return_scores (bool, optional): Whether or not to include the projections. Defaults to False.
 
+        Returns:
+            y_pred_proba (numpy.ndarray): predictions in {0,1}
+                Shape: ``[n_samples,n_sup_networks]``
+            s (numpy.ndarray): supervised network activation scores
+                Shape: ``[n_samples,n_components]
+        """
         _,y_pred,s = self.transform(X)
 
         if return_scores:
@@ -371,10 +544,40 @@ class dCSFA_NMF(NMF_Base):
             return y_pred > 0.5
 
     def project(self,X):
+        """
+        Get projections
+
+        Args:
+            X (numpy.ndarray): Input Features
+                Shape: ``[n_samples,n_features]
+            return_scores (bool, optional): Whether or not to include the projections. Defaults to False.
+
+        Returns:
+            s (numpy.ndarray): supervised network activation scores
+                Shape: ``[n_samples,n_components]
+        """
         _,_,s = self.transform(X)
         return s
 
     def score(self,X,y,groups=None,return_dict=False):
+        """
+        Gets a list of task AUCs either by group or for all samples. Can return
+        a dictionary with AUCs for each group with each group label as a key.
+
+        Args:
+            X (numpy.ndarray): Input Features
+                Shape: ``[n_samples,n_features]
+            y (numpy.ndarray): Ground Truth Labels
+                Shape: ``[n_samples,n_sup_networks]``
+
+            groups (numpy.ndarray, optional): per window group assignment labels. Defaults to None.
+                Shape: ``[n_samples,1]``
+            return_dict (bool, optional): Whether or not to return a dictionary with values for each group. Defaults to False.
+
+        Returns:
+            score_results: Array or Dictionary of results either as the mean performance of all groups, the performance of all samples, 
+                or a dictionary of results for each group.
+        """
         _,y_pred,_ = self.transform(X)
 
         if groups is not None:
@@ -388,11 +591,11 @@ class dCSFA_NMF(NMF_Base):
                 auc_dict[group] = auc_list
 
             if return_dict:
-                return auc_dict
+                score_results = auc_dict
 
             else:
                 auc_array = np.vstack([auc_dict[key] for key in np.unique(groups)])
-                return np.mean(auc_array,axis=0)
+                score_results = np.mean(auc_array,axis=0)
         
         else:
             auc_list = []
@@ -400,7 +603,9 @@ class dCSFA_NMF(NMF_Base):
                 auc = roc_auc_score(y[:,sup_net],y_pred[:,sup_net])
                 auc_list.append(auc)
 
-            return np.array(auc_list)
+            score_results = np.array(auc_list)
+
+        return score_results
 
 
 
